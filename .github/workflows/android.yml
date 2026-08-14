@@ -1,24 +1,132 @@
-name: android
+name: Build aria2 for Android arm64-v8a
 
 on:
   push:
-    paths:
-    - Dockerfile.android
-  schedule:
-  - cron: '30 1 * * *'
-
-permissions: read-all
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-
+    runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
-    - name: Build
-      uses: docker/build-push-action@v7
-      with:
-        file: Dockerfile.android
-        context: .
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            p7zip-full xz-utils dpkg-dev \
+            autoconf automake libtool pkg-config gettext
+
+      - name: Download Android NDK r30-beta2
+        run: |
+          wget -q https://googledownloads.cn/android/repository/android-ndk-r30-beta2-linux.zip -O ndk.zip
+          unzip -q ndk.zip -d $HOME
+          echo "NDK_ROOT=$HOME/android-ndk-r30" >> $GITHUB_ENV
+
+      - name: Download and extract dependencies
+        run: |
+          mkdir -p $HOME/deps
+
+          # zlib (.7z)
+          wget -q https://github.com/CELEFT/C/releases/download/trash/zlib-lib.7z -O /tmp/zlib.7z
+          7z x /tmp/zlib.7z -o/tmp/zlib_extract
+          mkdir -p $HOME/deps/zlib
+          cp -r /tmp/zlib_extract/* $HOME/deps/zlib/
+
+          # openssl (.tar.gz)
+          wget -q https://github.com/CELEFT/C/releases/download/android-openssl-latest/openssl-android-arm64-v8a-api35-3.5.7.tar.gz -O /tmp/openssl.tar.gz
+          mkdir -p $HOME/deps/openssl
+          tar -xzf /tmp/openssl.tar.gz --strip-components=1 -C $HOME/deps/openssl
+
+          # libexpat (.tar.xz)
+          wget -q https://github.com/CELEFT/C/releases/download/libexpat%2Blibcares/libexpat-android-35-arm64-v8a-20260813.tar.xz -O /tmp/expat.tar.xz
+          mkdir -p $HOME/deps/expat
+          tar -xJf /tmp/expat.tar.xz --strip-components=1 -C $HOME/deps/expat
+
+          # libcares (.tar.xz)
+          wget -q https://github.com/CELEFT/C/releases/download/libexpat%2Blibcares/libcares-android-35-arm64-v8a-20260813.tar.xz -O /tmp/cares.tar.xz
+          mkdir -p $HOME/deps/cares
+          tar -xJf /tmp/cares.tar.xz --strip-components=1 -C $HOME/deps/cares
+
+          # libssh2 (.7z)
+          wget -q https://github.com/CELEFT/C/releases/download/trash/libssh2.7z -O /tmp/libssh2.7z
+          7z x /tmp/libssh2.7z -o/tmp/libssh2_extract
+          mkdir -p $HOME/deps/libssh2
+          cp -r /tmp/libssh2_extract/* $HOME/deps/libssh2/
+
+          # 修正所有 .pc 文件中的 prefix 为实际解压根目录
+          for lib in zlib openssl expat cares libssh2; do
+            if [ -d "$HOME/deps/$lib" ]; then
+              find "$HOME/deps/$lib" -name "*.pc" -exec sed -i "s|^prefix=.*|prefix=$HOME/deps/$lib|g" {} \;
+            fi
+          done
+
+      - name: Set up environment variables
+        run: |
+          NDK_ROOT=$HOME/android-ndk-r30
+          TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
+          SYSROOT=$TOOLCHAIN/sysroot
+
+          PKG_CONFIG_LIBDIR=$(find $HOME/deps -name "*.pc" -printf "%h\n" | sort -u | tr '\n' ':' | sed 's/:$//')
+          echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR" >> $GITHUB_ENV
+          echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
+          echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
+
+          echo "CC=$TOOLCHAIN/bin/aarch64-linux-android35-clang" >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN/bin/aarch64-linux-android35-clang++" >> $GITHUB_ENV
+          echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+          echo "AS=$TOOLCHAIN/bin/llvm-as" >> $GITHUB_ENV
+          echo "LD=$TOOLCHAIN/bin/ld.lld" >> $GITHUB_ENV
+          echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+          echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
+
+      - name: Check configure exists
+        run: |
+          if [ ! -f configure ]; then
+            echo "Error: configure script not found!"
+            exit 1
+          fi
+          chmod +x configure
+          ls -la configure
+
+      - name: Configure
+        run: |
+          ./configure \
+            --host=aarch64-linux-android \
+            --disable-nls \
+            --without-gnutls \
+            --with-openssl \
+            --without-sqlite3 \
+            --without-libxml2 \
+            --with-libexpat \
+            --with-libcares \
+            --with-libz \
+            --with-libssh2 \
+            --disable-static \
+            --enable-shared \
+            CXXFLAGS="-Os -g" \
+            CFLAGS="-Os -g" \
+            CPPFLAGS="-fPIE" \
+            LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$ORIGIN/lib:./lib' -static-libstdc++" \
+            PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR"
+
+      - name: Build
+        run: make -j$(nproc)
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p output/bin output/lib
+          cp src/aria2c output/bin/
+          find $HOME/deps -name "*.so" -exec cp {} output/lib/ \;
+          $STRIP output/bin/aria2c
+          find output/lib -name "*.so" -exec $STRIP {} \; 2>/dev/null || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aria2-android-arm64-v8a
+          path: output/
