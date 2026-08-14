@@ -69,6 +69,9 @@ jobs:
           7z x /tmp/libssh2.7z -o/tmp/libssh2_extract -y
           mkdir -p $HOME/deps/libssh2 && cp -r /tmp/libssh2_extract/* $HOME/deps/libssh2/
 
+          # 清理 7z 带来的 macOS PAX 元数据（PaxHeader 占位文件），避免污染后续处理
+          find $HOME/deps -name "PaxHeader" -exec rm -rf {} + 2>/dev/null || true
+
           echo "================ 解压完成 ================"
           for lib in zlib openssl expat cares libssh2; do
             echo "---- $HOME/deps/$lib ----"
@@ -101,8 +104,8 @@ jobs:
 
             echo "==> [$lib] prefix=$prefix  libdir=$libdir  includedir=$incdir"
 
-            # 3) 把 .pc 里的 prefix/libdir/includedir 全部对齐到实际路径
-            find "$base" -name "*.pc" -exec sed -i \
+            # 3) 把 .pc 里的 prefix/libdir/includedir 全部对齐到实际路径（排除 PaxHeader）
+            find "$base" -name "*.pc" ! -path "*/PaxHeader/*" -exec sed -i \
               -e "s|^prefix=.*|prefix=$prefix|" \
               -e "s|^libdir=.*|libdir=${libdir}|" \
               -e "s|^includedir=.*|includedir=${incdir}|" \
@@ -116,9 +119,10 @@ jobs:
           done
 
           echo "================ 修正后的 .pc 文件 ================"
-          for f in $(find $HOME/deps -name "*.pc"); do
+          # 只列出真实 .pc（排除 PaxHeader），grep 加 || true 防止 set -e 中断
+          for f in $(find $HOME/deps -name "*.pc" ! -path "*/PaxHeader/*"); do
             echo "--- $f ---"
-            grep -E "^(prefix|libdir|includedir)=" "$f"
+            grep -E "^(prefix|libdir|includedir)=" "$f" || true
           done
 
       - name: Set up environment variables (auto-detect compiler)
@@ -148,7 +152,7 @@ jobs:
           echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip"   >> $GITHUB_ENV
 
-          PKG_CONFIG_LIBDIR=$(find $HOME/deps -name "*.pc" -printf "%h\n" | grep -v PaxHeader | sort -u | tr '\n' ':' | sed 's/:$//')
+          PKG_CONFIG_LIBDIR=$(find $HOME/deps -name "*.pc" ! -path "*/PaxHeader/*" -printf "%h\n" | sort -u | tr '\n' ':' | sed 's/:$//')
           echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR" >> $GITHUB_ENV
           echo "$TOOLCHAIN/bin" >> $GITHUB_PATH
 
