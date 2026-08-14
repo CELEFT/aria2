@@ -26,8 +26,8 @@ jobs:
           wget -q https://googledownloads.cn/android/repository/android-ndk-r30-beta2-linux.zip -O ndk.zip
           unzip -q ndk.zip -d $HOME
           echo "NDK_ROOT=$HOME/android-ndk-r30" >> $GITHUB_ENV
-          # 列出 NDK 目录结构以便调试（可选）
-          ls -l $HOME/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -20
+          # 列出 bin 目录，方便调试
+          ls -l $HOME/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -30
 
       - name: Download and extract dependency libraries
         run: |
@@ -50,33 +50,48 @@ jobs:
           7z x /tmp/libssh2.7z -o/tmp/libssh2_extract
           mkdir -p $HOME/deps/libssh2 && cp -r /tmp/libssh2_extract/* $HOME/deps/libssh2/
 
-          # 修正所有 .pc 文件中的 prefix 为实际解压路径
+          # 修正 .pc 文件的 prefix
           for lib in zlib openssl expat cares libssh2; do
             if [ -d "$HOME/deps/$lib" ]; then
               find "$HOME/deps/$lib" -name "*.pc" -exec sed -i "s|^prefix=.*|prefix=$HOME/deps/$lib|g" {} \;
             fi
           done
 
-      - name: Set up environment variables for NDK
+      - name: Set up environment variables (auto-detect compiler)
         run: |
           NDK_ROOT=$HOME/android-ndk-r30
-          API=35
-          TARGET=aarch64-linux-android
           TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
           SYSROOT=$TOOLCHAIN/sysroot
 
-          # 使用通用 clang，并通过 --target 指定目标
-          export CC="$TOOLCHAIN/bin/clang --target=${TARGET}${API}"
-          export CXX="$TOOLCHAIN/bin/clang++ --target=${TARGET}${API}"
-          export AR="$TOOLCHAIN/bin/llvm-ar"
-          export AS="$TOOLCHAIN/bin/llvm-as"
-          export LD="$TOOLCHAIN/bin/ld.lld"
-          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
-          export STRIP="$TOOLCHAIN/bin/llvm-strip"
+          # 自动探测可用的 clang
+          # 优先使用带有 API 35 的，若没有则尝试 30，再没有则使用不带 API 的 clang + --target
+          if [ -f "$TOOLCHAIN/bin/aarch64-linux-android35-clang" ]; then
+            CC="$TOOLCHAIN/bin/aarch64-linux-android35-clang"
+            CXX="$TOOLCHAIN/bin/aarch64-linux-android35-clang++"
+          elif [ -f "$TOOLCHAIN/bin/aarch64-linux-android30-clang" ]; then
+            CC="$TOOLCHAIN/bin/aarch64-linux-android30-clang"
+            CXX="$TOOLCHAIN/bin/aarch64-linux-android30-clang++"
+          elif [ -f "$TOOLCHAIN/bin/clang" ]; then
+            # 使用通用 clang + --target
+            CC="$TOOLCHAIN/bin/clang --target=aarch64-linux-android35"
+            CXX="$TOOLCHAIN/bin/clang++ --target=aarch64-linux-android35"
+          else
+            echo "No suitable clang found! Listing bin directory:"
+            ls -l $TOOLCHAIN/bin/
+            exit 1
+          fi
 
-          # 收集所有 .pc 目录（排除 PaxHeader）
+          # 其他工具
+          AR="$TOOLCHAIN/bin/llvm-ar"
+          AS="$TOOLCHAIN/bin/llvm-as"
+          LD="$TOOLCHAIN/bin/ld.lld"
+          RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+          STRIP="$TOOLCHAIN/bin/llvm-strip"
+
+          # PKG_CONFIG_LIBDIR
           PKG_CONFIG_LIBDIR=$(find $HOME/deps -name "*.pc" -printf "%h\n" | grep -v PaxHeader | sort -u | tr '\n' ':' | sed 's/:$//')
 
+          # 导出环境变量
           echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
           echo "CC=$CC" >> $GITHUB_ENV
           echo "CXX=$CXX" >> $GITHUB_ENV
@@ -97,7 +112,6 @@ jobs:
       - name: Test compiler functionality
         run: |
           echo 'int main() { return 0; }' > test.c
-          # 使用已设置的环境变量（含 --target），并添加 --sysroot
           $CC --sysroot=$SYSROOT -pie test.c -o test || {
             echo "=== Compilation test failed, verbose output ==="
             $CC --sysroot=$SYSROOT -v -pie test.c -o test 2>&1
@@ -142,12 +156,18 @@ jobs:
       - name: Build aria2
         run: make -j$(nproc)
 
-      - name: Prepare artifacts (binaries and shared libraries)
+      - name: Prepare artifacts
         run: |
           mkdir -p output/bin output/lib
           cp src/aria2c output/bin/
           find $HOME/deps -name "*.so" -exec cp {} output/lib/ \;
-          cp $NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/35/libc++_shared.so output/lib/
+          # 复制 C++ 运行时，路径可能因 API 不同而异，这里尝试找 libc++_shared.so
+          CXX_RUNTIME=$(find $SYSROOT/usr/lib/aarch64-linux-android -name "libc++_shared.so" | head -1)
+          if [ -f "$CXX_RUNTIME" ]; then
+            cp "$CXX_RUNTIME" output/lib/
+          else
+            echo "Warning: libc++_shared.so not found, may cause runtime issues."
+          fi
           $STRIP output/bin/aria2c
           find output/lib -name "*.so" -exec $STRIP {} \; 2>/dev/null || true
 
