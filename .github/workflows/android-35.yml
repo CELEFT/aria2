@@ -98,7 +98,7 @@ jobs:
             [ -n "$prefix" ] || prefix="$base"
 
             # 2) 在该根下定位实际的库目录（可能是 lib 或 lib64）
-            libdir=$(find "$prefix" -maxdepth 2 -type d \( -name lib -o -name lib64 \) -printf "%p\n" 2>/dev/null | shallowest)
+            libdir=$(find "$prefix" -maxdepth 2 -type d $ -name lib -o -name lib64 $ -printf "%p\n" 2>/dev/null | shallowest)
             [ -n "$libdir" ] || libdir="$prefix/lib"
             incdir="$prefix/include"
 
@@ -198,9 +198,10 @@ jobs:
           # 2) 跑 autoreconf（会调用真正的 autopoint / automake / autoconf）
           autoreconf -fi || echo "WARNING: autoreconf exited non-zero, continuing..."
 
-          # 3) 关键 gettext 文件必须存在，否则 config.status 会挂
-          if [ ! -f po/Makefile.in.in ] || [ ! -f po/Makefile.in ]; then
-            echo "=== ERROR: po/ gettext files not generated ==="
+          # 3) 只检查 po/Makefile.in.in（config.status 需要它作输入来生成 po/Makefile.in；
+          #    po/Makefile.in 是 configure 阶段生成的，autoreconf 阶段不需要）
+          if [ ! -f po/Makefile.in.in ]; then
+            echo "=== ERROR: po/Makefile.in.in not generated ==="
             ls -la po/ 2>/dev/null
             exit 1
           fi
@@ -253,51 +254,4 @@ jobs:
             RANLIB="$RANLIB" \
             STRIP="$STRIP" \
             CXXFLAGS="-Os -g --sysroot=$SYSROOT" \
-            CFLAGS="-Os -g --sysroot=$SYSROOT" \
-            CPPFLAGS="-fPIE $DEPS_CFLAGS" \
-            LDFLAGS="$LDFLAGS" \
-            # 显式给 pkg-config 检测传参，绕开 .pc 缺失或损坏
-            OPENSSL_CFLAGS="-I$OPENSSL_INC" \
-            OPENSSL_LIBS="-L$OPENSSL_LIB -lssl -lcrypto" \
-            LIBSSH2_CFLAGS="-I$LIBSSH2_INC" \
-            LIBSSH2_LIBS="-L$LIBSSH2_LIB -lssh2" \
-            PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" || {
-              echo "=== configure failed, dumping config.log (tail) ==="
-              tail -n 100 config.log
-              exit 1
-            }
-
-      - name: Build aria2
-        run: make -j$(nproc)
-
-      - name: Prepare artifacts
-        run: |
-          set -e
-          mkdir -p output/bin output/lib
-          cp src/aria2c output/bin/
-
-          find $HOME/deps -name "*.so" -exec cp {} output/lib/ \;
-
-          if [ "$LINK_CXX_STATIC" = "true" ]; then
-            echo "已静态链接 libc++（-static-libstdc++），无需打包 libc++_shared.so"
-          else
-            CXX_RUNTIME=$(find $SYSROOT/usr/lib/aarch64-linux-android -name "libc++_shared.so" | head -1)
-            if [ -f "$CXX_RUNTIME" ]; then
-              cp "$CXX_RUNTIME" output/lib/
-            else
-              echo "Warning: libc++_shared.so not found, may cause runtime issues."
-            fi
-          fi
-
-          $STRIP output/bin/aria2c
-          find output/lib -name "*.so" -exec $STRIP {} \; 2>/dev/null || true
-
-          echo "--- output tree ---"
-          find output -type f | sort
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: aria2-android-arm64-v8a
-          path: output/
-          if-no-files-found: error
+            CFLAGS="-Os -g --sysroot=$SYSRO
