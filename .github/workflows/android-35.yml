@@ -7,9 +7,21 @@ on:
     branches: [ master ]
   workflow_dispatch:
 
+env:
+  # ================= 可配置项 =================
+  NDK_VERSION: r30-beta2
+  ANDROID_API: 35
+  # true  -> 静态链接 libc++（默认；不需要 libc++_shared.so）
+  # false -> 动态链接并打包 libc++_shared.so
+  LINK_CXX_STATIC: "true"
+  DEPS_URL: https://github.com/CELEFT/C/releases/download
+  OPENSSL_VER: 3.5.7
+  # ===========================================
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -21,87 +33,124 @@ jobs:
             p7zip-full xz-utils dpkg-dev \
             autoconf automake libtool pkg-config gettext file
 
-      - name: Download Android NDK r30-beta2
+      - name: Download Android NDK (arm64-v8a / android-35)
         run: |
-          wget -q https://googledownloads.cn/android/repository/android-ndk-r30-beta2-linux.zip -O ndk.zip
+          wget -q "https://googledownloads.cn/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -O ndk.zip
           unzip -q ndk.zip -d $HOME
-          echo "NDK_ROOT=$HOME/android-ndk-r30" >> $GITHUB_ENV
-          # 列出 bin 目录，方便调试
-          ls -l $HOME/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -30
+          NDK_ROOT=$(ls -d $HOME/android-ndk-* | head -1)
+          echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
+          echo "NDK extracted to: $NDK_ROOT"
+          ls -l $NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -30
 
-      - name: Download and extract dependency libraries
+      - name: Download and extract prebuilt dependency libraries
         run: |
+          set -e
           mkdir -p $HOME/deps
 
-          wget -q https://github.com/CELEFT/C/releases/download/trash/zlib-lib.7z -O /tmp/zlib.7z
-          7z x /tmp/zlib.7z -o/tmp/zlib_extract
+          # zlib
+          wget -q "$DEPS_URL/trash/zlib-lib.7z" -O /tmp/zlib.7z
+          7z x /tmp/zlib.7z -o/tmp/zlib_extract -y
           mkdir -p $HOME/deps/zlib && cp -r /tmp/zlib_extract/* $HOME/deps/zlib/
 
-          wget -q https://github.com/CELEFT/C/releases/download/android-openssl-latest/openssl-android-arm64-v8a-api35-3.5.7.tar.gz -O /tmp/openssl.tar.gz
+          # openssl（arm64-v8a, API 35）
+          wget -q "$DEPS_URL/android-openssl-latest/openssl-android-arm64-v8a-api35-${OPENSSL_VER}.tar.gz" -O /tmp/openssl.tar.gz
           mkdir -p $HOME/deps/openssl && tar -xzf /tmp/openssl.tar.gz --strip-components=1 -C $HOME/deps/openssl
 
-          wget -q https://github.com/CELEFT/C/releases/download/libexpat%2Blibcares/libexpat-android-35-arm64-v8a-20260813.tar.xz -O /tmp/expat.tar.xz
+          # libexpat
+          wget -q "$DEPS_URL/libexpat%2Blibcares/libexpat-android-35-arm64-v8a-20260813.tar.xz" -O /tmp/expat.tar.xz
           mkdir -p $HOME/deps/expat && tar -xJf /tmp/expat.tar.xz --strip-components=1 -C $HOME/deps/expat
 
-          wget -q https://github.com/CELEFT/C/releases/download/libexpat%2Blibcares/libcares-android-35-arm64-v8a-20260813.tar.xz -O /tmp/cares.tar.xz
+          # libcares
+          wget -q "$DEPS_URL/libexpat%2Blibcares/libcares-android-35-arm64-v8a-20260813.tar.xz" -O /tmp/cares.tar.xz
           mkdir -p $HOME/deps/cares && tar -xJf /tmp/cares.tar.xz --strip-components=1 -C $HOME/deps/cares
 
-          wget -q https://github.com/CELEFT/C/releases/download/trash/libssh2.7z -O /tmp/libssh2.7z
-          7z x /tmp/libssh2.7z -o/tmp/libssh2_extract
+          # libssh2
+          wget -q "$DEPS_URL/trash/libssh2.7z" -O /tmp/libssh2.7z
+          7z x /tmp/libssh2.7z -o/tmp/libssh2_extract -y
           mkdir -p $HOME/deps/libssh2 && cp -r /tmp/libssh2_extract/* $HOME/deps/libssh2/
 
-          # 修正 .pc 文件的 prefix
+          echo "================ 解压完成 ================"
           for lib in zlib openssl expat cares libssh2; do
-            if [ -d "$HOME/deps/$lib" ]; then
-              find "$HOME/deps/$lib" -name "*.pc" -exec sed -i "s|^prefix=.*|prefix=$HOME/deps/$lib|g" {} \;
+            echo "---- $HOME/deps/$lib ----"
+            find "$HOME/deps/$lib" -maxdepth 3 -type d | sort | head -50
+          done
+
+      - name: Match .pc files to the actual extracted layout
+        run: |
+          set -e
+
+          # 从一组目录中挑出层级最浅的那个（即"根目录"）
+          shallowest() {
+            while read -r p; do
+              [ -n "$p" ] && echo "$(printf '%s' "$p" | tr -cd '/' | wc -c) $p"
+            done | sort -n | head -1 | cut -d' ' -f2-
+          }
+
+          for lib in zlib openssl expat cares libssh2; do
+            base="$HOME/deps/$lib"
+            [ -d "$base" ] || continue
+
+            # 1) 真根目录 = 包含 include 子目录的目录（取最浅）
+            prefix=$(find "$base" -type d -name include -printf "%h\n" 2>/dev/null | shallowest)
+            [ -n "$prefix" ] || prefix="$base"
+
+            # 2) 在该根下定位实际的库目录（可能是 lib 或 lib64）
+            libdir=$(find "$prefix" -maxdepth 2 -type d \( -name lib -o -name lib64 \) -printf "%p\n" 2>/dev/null | shallowest)
+            [ -n "$libdir" ] || libdir="$prefix/lib"
+            incdir="$prefix/include"
+
+            echo "==> [$lib] prefix=$prefix  libdir=$libdir  includedir=$incdir"
+
+            # 3) 把 .pc 里的 prefix/libdir/includedir 全部对齐到实际路径
+            find "$base" -name "*.pc" -exec sed -i \
+              -e "s|^prefix=.*|prefix=$prefix|" \
+              -e "s|^libdir=.*|libdir=${libdir}|" \
+              -e "s|^includedir=.*|includedir=${incdir}|" \
+              {} \;
+
+            # 4) 导出 libssh2 的检测结果，供 configure 兜底使用
+            if [ "$lib" = "libssh2" ]; then
+              echo "LIBS2_INC=$incdir" >> $GITHUB_ENV
+              echo "LIBS2_LIB=$libdir" >> $GITHUB_ENV
             fi
+          done
+
+          echo "================ 修正后的 .pc 文件 ================"
+          for f in $(find $HOME/deps -name "*.pc"); do
+            echo "--- $f ---"
+            grep -E "^(prefix|libdir|includedir)=" "$f"
           done
 
       - name: Set up environment variables (auto-detect compiler)
         run: |
-          NDK_ROOT=$HOME/android-ndk-r30
           TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
           SYSROOT=$TOOLCHAIN/sysroot
+          echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
 
-          # 自动探测可用的 clang
-          # 优先使用带有 API 35 的，若没有则尝试 30，再没有则使用不带 API 的 clang + --target
-          if [ -f "$TOOLCHAIN/bin/aarch64-linux-android35-clang" ]; then
-            CC="$TOOLCHAIN/bin/aarch64-linux-android35-clang"
-            CXX="$TOOLCHAIN/bin/aarch64-linux-android35-clang++"
+          if [ -f "$TOOLCHAIN/bin/aarch64-linux-android${ANDROID_API}-clang" ]; then
+            CC="$TOOLCHAIN/bin/aarch64-linux-android${ANDROID_API}-clang"
+            CXX="$TOOLCHAIN/bin/aarch64-linux-android${ANDROID_API}-clang++"
           elif [ -f "$TOOLCHAIN/bin/aarch64-linux-android30-clang" ]; then
             CC="$TOOLCHAIN/bin/aarch64-linux-android30-clang"
             CXX="$TOOLCHAIN/bin/aarch64-linux-android30-clang++"
           elif [ -f "$TOOLCHAIN/bin/clang" ]; then
-            # 使用通用 clang + --target
-            CC="$TOOLCHAIN/bin/clang --target=aarch64-linux-android35"
-            CXX="$TOOLCHAIN/bin/clang++ --target=aarch64-linux-android35"
+            CC="$TOOLCHAIN/bin/clang --target=aarch64-linux-android${ANDROID_API}"
+            CXX="$TOOLCHAIN/bin/clang++ --target=aarch64-linux-android${ANDROID_API}"
           else
-            echo "No suitable clang found! Listing bin directory:"
-            ls -l $TOOLCHAIN/bin/
-            exit 1
+            echo "No suitable clang found!"; ls -l $TOOLCHAIN/bin/; exit 1
           fi
 
-          # 其他工具
-          AR="$TOOLCHAIN/bin/llvm-ar"
-          AS="$TOOLCHAIN/bin/llvm-as"
-          LD="$TOOLCHAIN/bin/ld.lld"
-          RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
-          STRIP="$TOOLCHAIN/bin/llvm-strip"
+          echo "CC=$CC"          >> $GITHUB_ENV
+          echo "CXX=$CXX"        >> $GITHUB_ENV
+          echo "AR=$TOOLCHAIN/bin/llvm-ar"      >> $GITHUB_ENV
+          echo "AS=$TOOLCHAIN/bin/llvm-as"      >> $GITHUB_ENV
+          echo "LD=$TOOLCHAIN/bin/ld.lld"       >> $GITHUB_ENV
+          echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+          echo "STRIP=$TOOLCHAIN/bin/llvm-strip"   >> $GITHUB_ENV
 
-          # PKG_CONFIG_LIBDIR
           PKG_CONFIG_LIBDIR=$(find $HOME/deps -name "*.pc" -printf "%h\n" | grep -v PaxHeader | sort -u | tr '\n' ':' | sed 's/:$//')
-
-          # 导出环境变量
-          echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
-          echo "CC=$CC" >> $GITHUB_ENV
-          echo "CXX=$CXX" >> $GITHUB_ENV
-          echo "AR=$AR" >> $GITHUB_ENV
-          echo "AS=$AS" >> $GITHUB_ENV
-          echo "LD=$LD" >> $GITHUB_ENV
-          echo "RANLIB=$RANLIB" >> $GITHUB_ENV
-          echo "STRIP=$STRIP" >> $GITHUB_ENV
           echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR" >> $GITHUB_ENV
-          echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
+          echo "$TOOLCHAIN/bin" >> $GITHUB_PATH
 
       - name: Generate auxiliary files (if configure missing)
         run: |
@@ -122,9 +171,22 @@ jobs:
 
       - name: Configure aria2
         run: |
+          set -e
+          LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$ORIGIN/lib:./lib'"
+          if [ "$LINK_CXX_STATIC" = "true" ]; then
+            LDFLAGS="$LDFLAGS -static-libstdc++"
+          fi
+
+          # libssh2 兜底：若 .pc 不可用，就用上一步检测出的真实路径
+          LIBS2_ARGS=""
+          if ! pkg-config --exists libssh2 2>/dev/null; then
+            LIBS2_ARGS="--with-libssh2-includes=$LIBS2_INC --with-libssh2-libs=$LIBS2_LIB"
+            echo "libssh2 未提供可用的 .pc，改用显式路径: $LIBS2_ARGS"
+          fi
+
           ./configure \
             --host=aarch64-linux-android \
-            --build=x86_64-pc-linux-gnu \
+            --build="$(dpkg-architecture -qDEB_BUILD_GNU_TYPE)" \
             --disable-nls \
             --without-gnutls \
             --with-openssl \
@@ -133,7 +195,7 @@ jobs:
             --with-libexpat \
             --with-libcares \
             --with-libz \
-            --with-libssh2 \
+            --with-libssh2 $LIBS2_ARGS \
             --disable-static \
             --enable-shared \
             AR="$AR" \
@@ -146,10 +208,10 @@ jobs:
             CXXFLAGS="-Os -g --sysroot=$SYSROOT" \
             CFLAGS="-Os -g --sysroot=$SYSROOT" \
             CPPFLAGS="-fPIE" \
-            LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$ORIGIN/lib:./lib'" \
+            LDFLAGS="$LDFLAGS" \
             PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" || {
-              echo "=== configure failed, dumping config.log ==="
-              cat config.log
+              echo "=== configure failed, dumping config.log (tail) ==="
+              tail -n 100 config.log
               exit 1
             }
 
@@ -158,21 +220,32 @@ jobs:
 
       - name: Prepare artifacts
         run: |
+          set -e
           mkdir -p output/bin output/lib
           cp src/aria2c output/bin/
+
           find $HOME/deps -name "*.so" -exec cp {} output/lib/ \;
-          # 复制 C++ 运行时，路径可能因 API 不同而异，这里尝试找 libc++_shared.so
-          CXX_RUNTIME=$(find $SYSROOT/usr/lib/aarch64-linux-android -name "libc++_shared.so" | head -1)
-          if [ -f "$CXX_RUNTIME" ]; then
-            cp "$CXX_RUNTIME" output/lib/
+
+          if [ "$LINK_CXX_STATIC" = "true" ]; then
+            echo "已静态链接 libc++（-static-libstdc++），无需打包 libc++_shared.so"
           else
-            echo "Warning: libc++_shared.so not found, may cause runtime issues."
+            CXX_RUNTIME=$(find $SYSROOT/usr/lib/aarch64-linux-android -name "libc++_shared.so" | head -1)
+            if [ -f "$CXX_RUNTIME" ]; then
+              cp "$CXX_RUNTIME" output/lib/
+            else
+              echo "Warning: libc++_shared.so not found, may cause runtime issues."
+            fi
           fi
+
           $STRIP output/bin/aria2c
           find output/lib -name "*.so" -exec $STRIP {} \; 2>/dev/null || true
+
+          echo "--- output tree ---"
+          find output -type f | sort
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: aria2-android-arm64-v8a
           path: output/
+          if-no-files-found: error
