@@ -20,6 +20,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: write
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -280,8 +282,6 @@ jobs:
           name: aria2-android-arm64-v8a
           path: output/
           if-no-files-found: error
-
-      # ===== 以下仅在 push master / schedule / workflow_dispatch 时执行（PR 不发 Release）=====
 
       - name: Package release archive (tar.xz)
         if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
