@@ -100,6 +100,25 @@ jobs:
             fi
           done
 
+      - name: Verify OpenSSL version in libcrypto.so
+        run: |
+          set -e
+          SO_FILE=$(find $HOME/deps/openssl -name "libcrypto.so*" | head -1)
+          if [ -z "$SO_FILE" ]; then
+            echo "ERROR: no libcrypto.so found under $HOME/deps/openssl"
+            exit 1
+          fi
+          echo "Checking: $SO_FILE"
+          if strings "$SO_FILE" | grep -q "OpenSSL ${OPENSSL_VER} "; then
+            echo "OK: libcrypto reports OpenSSL ${OPENSSL_VER}"
+          else
+            echo "ERROR: libcrypto does NOT report OpenSSL ${OPENSSL_VER}"
+            echo "--- libcrypto.so 中 OpenSSL 版本相关字符串 ---"
+            strings "$SO_FILE" | grep -E 'OpenSSL [0-9]' || true
+            echo "建议：换用版本正确的预构建包，或改用源码编译 OpenSSL"
+            exit 1
+          fi
+
       - name: Match .pc files / generate missing ones
         run: |
           set -e
@@ -246,12 +265,14 @@ jobs:
           DEPS_CFLAGS="-I$ZLIB_INC -I$OPENSSL_INC -I$EXPAT_INC -I$CARES_INC -I$LIBSSH2_INC"
           DEPS_LDFLAGS="-L$ZLIB_LIB -L$OPENSSL_LIB -L$EXPAT_LIB -L$CARES_LIB -L$LIBSSH2_LIB"
 
-          LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$ORIGIN/lib:./lib' $DEPS_LDFLAGS"
+          # 注意：Makefile 里 $ 是特殊字符，$ORIGIN 要写成 \$\$ORIGIN，
+          # 否则 $O 被 make 展开成空 -> 运行时 rpath 变成 RIGIN/lib
+          LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$\$ORIGIN/lib:./lib' $DEPS_LDFLAGS"
           if [ "$LINK_CXX_STATIC" = "true" ]; then
             LDFLAGS="$LDFLAGS -static-libstdc++"
           fi
 
-          # 显式给 pkg-config 检测传参，绕开 openssl/libssh2 的 .pc 缺失或损坏
+          # 显式给 pkg-config 检测传参，绕开 .pc 缺失或损坏
           ./configure \
             --host=aarch64-linux-android \
             --build="$(dpkg-architecture -qDEB_BUILD_GNU_TYPE)" \
@@ -298,7 +319,7 @@ jobs:
           mkdir -p output/bin output/lib
           cp src/aria2c output/bin/
 
-          # 拷贝所有 .so*（含版本号，如 libz.so.1.3.2 / libcrypto.so.3），跟随符号链接复制真实 ELF
+          # 拷贝所有 .so*（含版本号），跟随符号链接复制真实 ELF
           find $HOME/deps \( -name "*.so" -o -name "*.so.*" \) -exec cp -L {} output/lib/ \; 2>/dev/null || true
 
           if [ "$LINK_CXX_STATIC" = "true" ]; then
