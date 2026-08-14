@@ -111,22 +111,23 @@ jobs:
               -e "s|^includedir=.*|includedir=${incdir}|" \
               {} \;
 
-            # 4) openssl 预编译包通常不带 .pc，手动生成一个，让 pkg-config 能找到它
+            # 4) openssl 预编译包通常不带 .pc，手动生成一个
+            #    用 echo 重定向生成，避免 heredoc 内容行缩进破坏 YAML 块标量
             if [ "$lib" = "openssl" ]; then
               mkdir -p "$libdir/pkgconfig"
               PC="$libdir/pkgconfig/openssl.pc"
-              cat > "$PC" <<EOF
-prefix=$prefix
-libdir=$libdir
-includedir=$incdir
-
-Name: OpenSSL
-Description: Secure Sockets Layer and cryptography libraries
-Version: $OPENSSL_VER
-Libs: -L$libdir -lssl -lcrypto
-Libs.private: -ldl -pthread
-Cflags: -I$incdir
-EOF
+              {
+                echo "prefix=$prefix"
+                echo "libdir=$libdir"
+                echo "includedir=$incdir"
+                echo ""
+                echo "Name: OpenSSL"
+                echo "Description: Secure Sockets Layer and cryptography libraries"
+                echo "Version: $OPENSSL_VER"
+                echo "Libs: -L$libdir -lssl -lcrypto"
+                echo "Libs.private: -ldl -pthread"
+                echo "Cflags: -I$incdir"
+              } > "$PC"
               echo "Generated $PC (openssl 无自带 .pc)"
             fi
 
