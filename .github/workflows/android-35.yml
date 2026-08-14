@@ -1,4 +1,4 @@
-name: Build aria2 for Android arm64-v8a
+name: Build aria2 for Android (arm64-v8a, API 35)
 
 on:
   push:
@@ -14,12 +14,12 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Install build tools
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             p7zip-full xz-utils dpkg-dev \
-            autoconf automake libtool pkg-config gettext
+            autoconf automake libtool pkg-config gettext file
 
       - name: Download Android NDK r30-beta2
         run: |
@@ -27,74 +27,89 @@ jobs:
           unzip -q ndk.zip -d $HOME
           echo "NDK_ROOT=$HOME/android-ndk-r30" >> $GITHUB_ENV
 
-      - name: Download and extract dependencies
+      - name: Download and extract dependency libraries
         run: |
           mkdir -p $HOME/deps
 
-          # zlib (.7z)
+          # zlib
           wget -q https://github.com/CELEFT/C/releases/download/trash/zlib-lib.7z -O /tmp/zlib.7z
           7z x /tmp/zlib.7z -o/tmp/zlib_extract
           mkdir -p $HOME/deps/zlib
           cp -r /tmp/zlib_extract/* $HOME/deps/zlib/
 
-          # openssl (.tar.gz)
+          # OpenSSL
           wget -q https://github.com/CELEFT/C/releases/download/android-openssl-latest/openssl-android-arm64-v8a-api35-3.5.7.tar.gz -O /tmp/openssl.tar.gz
           mkdir -p $HOME/deps/openssl
           tar -xzf /tmp/openssl.tar.gz --strip-components=1 -C $HOME/deps/openssl
 
-          # libexpat (.tar.xz)
+          # libexpat
           wget -q https://github.com/CELEFT/C/releases/download/libexpat%2Blibcares/libexpat-android-35-arm64-v8a-20260813.tar.xz -O /tmp/expat.tar.xz
           mkdir -p $HOME/deps/expat
           tar -xJf /tmp/expat.tar.xz --strip-components=1 -C $HOME/deps/expat
 
-          # libcares (.tar.xz)
+          # libcares
           wget -q https://github.com/CELEFT/C/releases/download/libexpat%2Blibcares/libcares-android-35-arm64-v8a-20260813.tar.xz -O /tmp/cares.tar.xz
           mkdir -p $HOME/deps/cares
           tar -xJf /tmp/cares.tar.xz --strip-components=1 -C $HOME/deps/cares
 
-          # libssh2 (.7z)
+          # libssh2
           wget -q https://github.com/CELEFT/C/releases/download/trash/libssh2.7z -O /tmp/libssh2.7z
           7z x /tmp/libssh2.7z -o/tmp/libssh2_extract
           mkdir -p $HOME/deps/libssh2
           cp -r /tmp/libssh2_extract/* $HOME/deps/libssh2/
 
-          # 修正所有 .pc 文件中的 prefix 为实际解压根目录，并排除 PaxHeader
+          # Correct all .pc files prefix to the actual extracted paths
           for lib in zlib openssl expat cares libssh2; do
             if [ -d "$HOME/deps/$lib" ]; then
               find "$HOME/deps/$lib" -name "*.pc" -exec sed -i "s|^prefix=.*|prefix=$HOME/deps/$lib|g" {} \;
             fi
           done
 
-      - name: Set up environment variables
+      - name: Set up environment variables for NDK
         run: |
           NDK_ROOT=$HOME/android-ndk-r30
+          API=35
+          TARGET=aarch64-linux-android
           TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
           SYSROOT=$TOOLCHAIN/sysroot
 
-          # 收集所有 .pc 目录，排除 PaxHeader
+          # Build PKG_CONFIG_LIBDIR by collecting all .pc directories, excluding PaxHeader
           PKG_CONFIG_LIBDIR=$(find $HOME/deps -name "*.pc" -printf "%h\n" | grep -v PaxHeader | sort -u | tr '\n' ':' | sed 's/:$//')
-          echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR" >> $GITHUB_ENV
+
           echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
+          echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR" >> $GITHUB_ENV
           echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
 
-          echo "CC=$TOOLCHAIN/bin/aarch64-linux-android35-clang" >> $GITHUB_ENV
-          echo "CXX=$TOOLCHAIN/bin/aarch64-linux-android35-clang++" >> $GITHUB_ENV
+          echo "CC=$TOOLCHAIN/bin/${TARGET}${API}-clang" >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++" >> $GITHUB_ENV
           echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
           echo "AS=$TOOLCHAIN/bin/llvm-as" >> $GITHUB_ENV
           echo "LD=$TOOLCHAIN/bin/ld.lld" >> $GITHUB_ENV
           echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
 
-      - name: Generate auxiliary files
+      - name: Generate auxiliary files (if configure missing)
         run: |
           touch config.rpath ABOUT-NLS
           AUTOPOINT=true autoreconf -fi
           chmod +x configure
 
-      - name: Configure
+      - name: Test compiler functionality
+        run: |
+          echo 'int main() { return 0; }' > test.c
+          $CC --sysroot=$SYSROOT -pie test.c -o test || {
+            echo "=== Compilation test failed, verbose output ==="
+            $CC --sysroot=$SYSROOT -v test.c -o test 2>&1
+            exit 1
+          }
+          file test
+          rm test test.c
+
+      - name: Configure aria2
         run: |
           ./configure \
             --host=aarch64-linux-android \
+            --build=x86_64-pc-linux-gnu \
             --disable-nls \
             --without-gnutls \
             --with-openssl \
@@ -106,23 +121,40 @@ jobs:
             --with-libssh2 \
             --disable-static \
             --enable-shared \
+            AR="$AR" \
+            AS="$AS" \
+            CC="$CC" \
+            CXX="$CXX" \
+            LD="$LD" \
+            RANLIB="$RANLIB" \
+            STRIP="$STRIP" \
             CXXFLAGS="-Os -g" \
             CFLAGS="-Os -g" \
             CPPFLAGS="-fPIE" \
-            LDFLAGS="--sysroot=$SYSROOT -pie" \
-            PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR"
+            LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$ORIGIN/lib:./lib'" \
+            PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" || {
+              echo "=== configure failed, dumping config.log ==="
+              cat config.log
+              exit 1
+            }
 
-      - name: Build
+      - name: Build aria2
         run: make -j$(nproc)
 
-      - name: Prepare artifacts
+      - name: Prepare artifacts (binaries and shared libraries)
         run: |
           mkdir -p output/bin output/lib
+
+          # Copy the executable
           cp src/aria2c output/bin/
-          # 复制所有依赖的 .so
+
+          # Copy all dependency .so files
           find $HOME/deps -name "*.so" -exec cp {} output/lib/ \;
-          # 复制 C++ 共享运行时
+
+          # Copy C++ shared runtime
           cp $NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/35/libc++_shared.so output/lib/
+
+          # Strip binaries to reduce size
           $STRIP output/bin/aria2c
           find output/lib -name "*.so" -exec $STRIP {} \; 2>/dev/null || true
 
