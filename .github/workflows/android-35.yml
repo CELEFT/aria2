@@ -78,7 +78,7 @@ jobs:
             find "$HOME/deps/$lib" -maxdepth 3 -type d | sort | head -50
           done
 
-      - name: Match .pc files to the actual extracted layout
+      - name: Match .pc files / generate missing ones
         run: |
           set -e
 
@@ -104,22 +104,39 @@ jobs:
 
             echo "==> [$lib] prefix=$prefix  libdir=$libdir  includedir=$incdir"
 
-            # 3) 把 .pc 里的 prefix/libdir/includedir 全部对齐到实际路径（排除 PaxHeader）
+            # 3) 已有的 .pc：把 prefix/libdir/includedir 对齐到实际路径（排除 PaxHeader）
             find "$base" -name "*.pc" ! -path "*/PaxHeader/*" -exec sed -i \
               -e "s|^prefix=.*|prefix=$prefix|" \
               -e "s|^libdir=.*|libdir=${libdir}|" \
               -e "s|^includedir=.*|includedir=${incdir}|" \
               {} \;
 
-            # 4) 导出 libssh2 的检测结果，供 configure 兜底使用
-            if [ "$lib" = "libssh2" ]; then
-              echo "LIBS2_INC=$incdir" >> $GITHUB_ENV
-              echo "LIBS2_LIB=$libdir" >> $GITHUB_ENV
+            # 4) openssl 预编译包通常不带 .pc，手动生成一个，让 pkg-config 能找到它
+            if [ "$lib" = "openssl" ]; then
+              mkdir -p "$libdir/pkgconfig"
+              PC="$libdir/pkgconfig/openssl.pc"
+              cat > "$PC" <<EOF
+prefix=$prefix
+libdir=$libdir
+includedir=$incdir
+
+Name: OpenSSL
+Description: Secure Sockets Layer and cryptography libraries
+Version: $OPENSSL_VER
+Libs: -L$libdir -lssl -lcrypto
+Libs.private: -ldl -pthread
+Cflags: -I$incdir
+EOF
+              echo "Generated $PC (openssl 无自带 .pc)"
             fi
+
+            # 5) 导出每个库的真实路径，供 configure 显式传参兜底
+            libupper=$(echo "$lib" | tr 'a-z' 'A-Z')
+            echo "${libupper}_INC=$incdir" >> $GITHUB_ENV
+            echo "${libupper}_LIB=$libdir" >> $GITHUB_ENV
           done
 
           echo "================ 修正后的 .pc 文件 ================"
-          # 只列出真实 .pc（排除 PaxHeader），grep 加 || true 防止 set -e 中断
           for f in $(find $HOME/deps -name "*.pc" ! -path "*/PaxHeader/*"); do
             echo "--- $f ---"
             grep -E "^(prefix|libdir|includedir)=" "$f" || true
@@ -176,16 +193,13 @@ jobs:
       - name: Configure aria2
         run: |
           set -e
-          LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$ORIGIN/lib:./lib'"
+          # 把所有依赖库的 include/lib 目录都塞进 CPPFLAGS/LDFLAGS，避免找不到头文件/库
+          DEPS_CFLAGS="-I$ZLIB_INC -I$OPENSSL_INC -I$EXPAT_INC -I$CARES_INC -I$LIBSSH2_INC"
+          DEPS_LDFLAGS="-L$ZLIB_LIB -L$OPENSSL_LIB -L$EXPAT_LIB -L$CARES_LIB -L$LIBSSH2_LIB"
+
+          LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$ORIGIN/lib:./lib' $DEPS_LDFLAGS"
           if [ "$LINK_CXX_STATIC" = "true" ]; then
             LDFLAGS="$LDFLAGS -static-libstdc++"
-          fi
-
-          # libssh2 兜底：若 .pc 不可用，就用上一步检测出的真实路径
-          LIBS2_ARGS=""
-          if ! pkg-config --exists libssh2 2>/dev/null; then
-            LIBS2_ARGS="--with-libssh2-includes=$LIBS2_INC --with-libssh2-libs=$LIBS2_LIB"
-            echo "libssh2 未提供可用的 .pc，改用显式路径: $LIBS2_ARGS"
           fi
 
           ./configure \
@@ -199,7 +213,9 @@ jobs:
             --with-libexpat \
             --with-libcares \
             --with-libz \
-            --with-libssh2 $LIBS2_ARGS \
+            --with-libssh2 \
+            --with-libssh2-includes="$LIBSSH2_INC" \
+            --with-libssh2-libs="$LIBSSH2_LIB" \
             --disable-static \
             --enable-shared \
             AR="$AR" \
@@ -211,8 +227,13 @@ jobs:
             STRIP="$STRIP" \
             CXXFLAGS="-Os -g --sysroot=$SYSROOT" \
             CFLAGS="-Os -g --sysroot=$SYSROOT" \
-            CPPFLAGS="-fPIE" \
+            CPPFLAGS="-fPIE $DEPS_CFLAGS" \
             LDFLAGS="$LDFLAGS" \
+            # 显式给 pkg-config 检测传参，绕开 openssl/libssh2 的 .pc 缺失或损坏
+            OPENSSL_CFLAGS="-I$OPENSSL_INC" \
+            OPENSSL_LIBS="-L$OPENSSL_LIB -lssl -lcrypto" \
+            LIBSSH2_CFLAGS="-I$LIBSSH2_INC" \
+            LIBSSH2_LIBS="-L$LIBSSH2_LIB -lssh2" \
             PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" || {
               echo "=== configure failed, dumping config.log (tail) ==="
               tail -n 100 config.log
