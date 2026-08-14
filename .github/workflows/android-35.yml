@@ -164,14 +164,14 @@ jobs:
 
       - name: Test compiler functionality
         run: |
-          echo 'int main() { return 0; }' > test.c
-          $CC --sysroot=$SYSROOT -pie test.c -o test || {
+          echo 'int main() { return 0; }' > test_compile.c
+          $CC --sysroot=$SYSROOT -pie test_compile.c -o compile_test || {
             echo "=== Compilation test failed, verbose output ==="
-            $CC --sysroot=$SYSROOT -v -pie test.c -o test 2>&1
+            $CC --sysroot=$SYSROOT -v -pie test_compile.c -o compile_test 2>&1
             exit 1
           }
-          file test
-          rm test test.c
+          file compile_test
+          rm compile_test test_compile.c
 
       - name: Configure aria2
         run: |
