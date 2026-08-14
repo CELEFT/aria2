@@ -58,7 +58,7 @@ jobs:
           mkdir -p $HOME/deps/libssh2
           cp -r /tmp/libssh2_extract/* $HOME/deps/libssh2/
 
-          # 修正所有 .pc 文件中的 prefix 为实际解压根目录
+          # 修正所有 .pc 文件中的 prefix 为实际解压根目录，并排除 PaxHeader
           for lib in zlib openssl expat cares libssh2; do
             if [ -d "$HOME/deps/$lib" ]; then
               find "$HOME/deps/$lib" -name "*.pc" -exec sed -i "s|^prefix=.*|prefix=$HOME/deps/$lib|g" {} \;
@@ -71,7 +71,8 @@ jobs:
           TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
           SYSROOT=$TOOLCHAIN/sysroot
 
-          PKG_CONFIG_LIBDIR=$(find $HOME/deps -name "*.pc" -printf "%h\n" | sort -u | tr '\n' ':' | sed 's/:$//')
+          # 收集所有 .pc 目录，排除 PaxHeader
+          PKG_CONFIG_LIBDIR=$(find $HOME/deps -name "*.pc" -printf "%h\n" | grep -v PaxHeader | sort -u | tr '\n' ':' | sed 's/:$//')
           echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR" >> $GITHUB_ENV
           echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
           echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
@@ -108,7 +109,7 @@ jobs:
             CXXFLAGS="-Os -g" \
             CFLAGS="-Os -g" \
             CPPFLAGS="-fPIE" \
-            LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$ORIGIN/lib:./lib' -static-libstdc++" \
+            LDFLAGS="--sysroot=$SYSROOT -pie" \
             PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR"
 
       - name: Build
@@ -118,7 +119,10 @@ jobs:
         run: |
           mkdir -p output/bin output/lib
           cp src/aria2c output/bin/
+          # 复制所有依赖的 .so
           find $HOME/deps -name "*.so" -exec cp {} output/lib/ \;
+          # 复制 C++ 共享运行时
+          cp $NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/35/libc++_shared.so output/lib/
           $STRIP output/bin/aria2c
           find output/lib -name "*.so" -exec $STRIP {} \; 2>/dev/null || true
 
