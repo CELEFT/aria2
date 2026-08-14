@@ -112,7 +112,7 @@ jobs:
               {} \;
 
             # 4) openssl 预编译包通常不带 .pc，手动生成 openssl/libcrypto/libssl 三个
-            #    （libcrypto.pc 被 libssh2.pc 的 Requires 依赖，必须提供，否则 libssh2 检测会失败）
+            #    （libcrypto.pc 被 libssh2.pc 的 Requires 依赖，必须提供）
             if [ "$lib" = "openssl" ]; then
               mkdir -p "$libdir/pkgconfig"
               gen_pc() {
@@ -181,8 +181,29 @@ jobs:
 
       - name: Generate auxiliary files (if configure missing)
         run: |
+          set -e
           touch config.rpath ABOUT-NLS
-          AUTOPOINT=true autoreconf -fi
+
+          # 1) 确保 po/Makefile.in.in 存在（用真 autopoint，必要时手动补齐）
+          if [ ! -f po/Makefile.in.in ]; then
+            SRC=$(find /usr/share/gettext -name "Makefile.in.in" 2>/dev/null | head -1)
+            if [ -n "$SRC" ]; then
+              cp "$SRC" po/Makefile.in.in
+              echo "pre-copied po/Makefile.in.in from $SRC"
+            else
+              echo "WARNING: cannot pre-copy po/Makefile.in.in; will rely on autopoint"
+            fi
+          fi
+
+          # 2) 跑 autoreconf（会调用真正的 autopoint / automake / autoconf）
+          autoreconf -fi || echo "WARNING: autoreconf exited non-zero, continuing..."
+
+          # 3) 关键 gettext 文件必须存在，否则 config.status 会挂
+          if [ ! -f po/Makefile.in.in ] || [ ! -f po/Makefile.in ]; then
+            echo "=== ERROR: po/ gettext files not generated ==="
+            ls -la po/ 2>/dev/null
+            exit 1
+          fi
           chmod +x configure
 
       - name: Test compiler functionality
