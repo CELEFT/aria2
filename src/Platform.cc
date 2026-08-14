@@ -122,7 +122,8 @@ bool Platform::setUp()
   // RC4 is in the legacy provider.
   legacy_provider_ = OSSL_PROVIDER_load(nullptr, "legacy");
   if (!legacy_provider_) {
-    throw DL_ABORT_EX("OSSL_PROVIDER_load 'legacy' failed.");
+    // 仅记录警告，不终止程序
+    A2_LOG_WARN("OSSL_PROVIDER_load 'legacy' failed. Some algorithms may be unavailable.");
   }
 
   default_provider_ = OSSL_PROVIDER_load(nullptr, "default");
