@@ -26,39 +26,31 @@ jobs:
           wget -q https://googledownloads.cn/android/repository/android-ndk-r30-beta2-linux.zip -O ndk.zip
           unzip -q ndk.zip -d $HOME
           echo "NDK_ROOT=$HOME/android-ndk-r30" >> $GITHUB_ENV
+          # 列出 NDK 目录结构以便调试（可选）
+          ls -l $HOME/android-ndk-r30/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -20
 
       - name: Download and extract dependency libraries
         run: |
           mkdir -p $HOME/deps
 
-          # zlib
           wget -q https://github.com/CELEFT/C/releases/download/trash/zlib-lib.7z -O /tmp/zlib.7z
           7z x /tmp/zlib.7z -o/tmp/zlib_extract
-          mkdir -p $HOME/deps/zlib
-          cp -r /tmp/zlib_extract/* $HOME/deps/zlib/
+          mkdir -p $HOME/deps/zlib && cp -r /tmp/zlib_extract/* $HOME/deps/zlib/
 
-          # OpenSSL
           wget -q https://github.com/CELEFT/C/releases/download/android-openssl-latest/openssl-android-arm64-v8a-api35-3.5.7.tar.gz -O /tmp/openssl.tar.gz
-          mkdir -p $HOME/deps/openssl
-          tar -xzf /tmp/openssl.tar.gz --strip-components=1 -C $HOME/deps/openssl
+          mkdir -p $HOME/deps/openssl && tar -xzf /tmp/openssl.tar.gz --strip-components=1 -C $HOME/deps/openssl
 
-          # libexpat
           wget -q https://github.com/CELEFT/C/releases/download/libexpat%2Blibcares/libexpat-android-35-arm64-v8a-20260813.tar.xz -O /tmp/expat.tar.xz
-          mkdir -p $HOME/deps/expat
-          tar -xJf /tmp/expat.tar.xz --strip-components=1 -C $HOME/deps/expat
+          mkdir -p $HOME/deps/expat && tar -xJf /tmp/expat.tar.xz --strip-components=1 -C $HOME/deps/expat
 
-          # libcares
           wget -q https://github.com/CELEFT/C/releases/download/libexpat%2Blibcares/libcares-android-35-arm64-v8a-20260813.tar.xz -O /tmp/cares.tar.xz
-          mkdir -p $HOME/deps/cares
-          tar -xJf /tmp/cares.tar.xz --strip-components=1 -C $HOME/deps/cares
+          mkdir -p $HOME/deps/cares && tar -xJf /tmp/cares.tar.xz --strip-components=1 -C $HOME/deps/cares
 
-          # libssh2
           wget -q https://github.com/CELEFT/C/releases/download/trash/libssh2.7z -O /tmp/libssh2.7z
           7z x /tmp/libssh2.7z -o/tmp/libssh2_extract
-          mkdir -p $HOME/deps/libssh2
-          cp -r /tmp/libssh2_extract/* $HOME/deps/libssh2/
+          mkdir -p $HOME/deps/libssh2 && cp -r /tmp/libssh2_extract/* $HOME/deps/libssh2/
 
-          # Correct all .pc files prefix to the actual extracted paths
+          # 修正所有 .pc 文件中的 prefix 为实际解压路径
           for lib in zlib openssl expat cares libssh2; do
             if [ -d "$HOME/deps/$lib" ]; then
               find "$HOME/deps/$lib" -name "*.pc" -exec sed -i "s|^prefix=.*|prefix=$HOME/deps/$lib|g" {} \;
@@ -73,20 +65,28 @@ jobs:
           TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
           SYSROOT=$TOOLCHAIN/sysroot
 
-          # Build PKG_CONFIG_LIBDIR by collecting all .pc directories, excluding PaxHeader
+          # 使用通用 clang，并通过 --target 指定目标
+          export CC="$TOOLCHAIN/bin/clang --target=${TARGET}${API}"
+          export CXX="$TOOLCHAIN/bin/clang++ --target=${TARGET}${API}"
+          export AR="$TOOLCHAIN/bin/llvm-ar"
+          export AS="$TOOLCHAIN/bin/llvm-as"
+          export LD="$TOOLCHAIN/bin/ld.lld"
+          export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+          export STRIP="$TOOLCHAIN/bin/llvm-strip"
+
+          # 收集所有 .pc 目录（排除 PaxHeader）
           PKG_CONFIG_LIBDIR=$(find $HOME/deps -name "*.pc" -printf "%h\n" | grep -v PaxHeader | sort -u | tr '\n' ':' | sed 's/:$//')
 
           echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
+          echo "CC=$CC" >> $GITHUB_ENV
+          echo "CXX=$CXX" >> $GITHUB_ENV
+          echo "AR=$AR" >> $GITHUB_ENV
+          echo "AS=$AS" >> $GITHUB_ENV
+          echo "LD=$LD" >> $GITHUB_ENV
+          echo "RANLIB=$RANLIB" >> $GITHUB_ENV
+          echo "STRIP=$STRIP" >> $GITHUB_ENV
           echo "PKG_CONFIG_LIBDIR=$PKG_CONFIG_LIBDIR" >> $GITHUB_ENV
           echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
-
-          echo "CC=$TOOLCHAIN/bin/${TARGET}${API}-clang" >> $GITHUB_ENV
-          echo "CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++" >> $GITHUB_ENV
-          echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
-          echo "AS=$TOOLCHAIN/bin/llvm-as" >> $GITHUB_ENV
-          echo "LD=$TOOLCHAIN/bin/ld.lld" >> $GITHUB_ENV
-          echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
-          echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
 
       - name: Generate auxiliary files (if configure missing)
         run: |
@@ -97,9 +97,10 @@ jobs:
       - name: Test compiler functionality
         run: |
           echo 'int main() { return 0; }' > test.c
+          # 使用已设置的环境变量（含 --target），并添加 --sysroot
           $CC --sysroot=$SYSROOT -pie test.c -o test || {
             echo "=== Compilation test failed, verbose output ==="
-            $CC --sysroot=$SYSROOT -v test.c -o test 2>&1
+            $CC --sysroot=$SYSROOT -v -pie test.c -o test 2>&1
             exit 1
           }
           file test
@@ -128,8 +129,8 @@ jobs:
             LD="$LD" \
             RANLIB="$RANLIB" \
             STRIP="$STRIP" \
-            CXXFLAGS="-Os -g" \
-            CFLAGS="-Os -g" \
+            CXXFLAGS="-Os -g --sysroot=$SYSROOT" \
+            CFLAGS="-Os -g --sysroot=$SYSROOT" \
             CPPFLAGS="-fPIE" \
             LDFLAGS="--sysroot=$SYSROOT -pie -Wl,-rpath='\$ORIGIN/lib:./lib'" \
             PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR" || {
@@ -144,17 +145,9 @@ jobs:
       - name: Prepare artifacts (binaries and shared libraries)
         run: |
           mkdir -p output/bin output/lib
-
-          # Copy the executable
           cp src/aria2c output/bin/
-
-          # Copy all dependency .so files
           find $HOME/deps -name "*.so" -exec cp {} output/lib/ \;
-
-          # Copy C++ shared runtime
           cp $NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/35/libc++_shared.so output/lib/
-
-          # Strip binaries to reduce size
           $STRIP output/bin/aria2c
           find output/lib -name "*.so" -exec $STRIP {} \; 2>/dev/null || true
 
