@@ -84,14 +84,11 @@ jobs:
           echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
           echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
 
-      - name: Check configure exists
+      - name: Generate auxiliary files
         run: |
-          if [ ! -f configure ]; then
-            echo "Error: configure script not found!"
-            exit 1
-          fi
+          touch config.rpath ABOUT-NLS
+          AUTOPOINT=true autoreconf -fi
           chmod +x configure
-          ls -la configure
 
       - name: Configure
         run: |
